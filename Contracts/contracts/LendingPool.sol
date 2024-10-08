@@ -247,6 +247,17 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
 
         //create the loan 
 
+        uint256 loanId = _createLoanInternal(
+            borrower, 
+            _amount, 
+            _collateralId, 
+            _duration 
+        );
+
+        require(landingToken.transfer(borrower, _amount), "Transfer failed");
+
+        emit LoanCreated(loanId, borrower, _amount, _collaeralId);
+
         }
         
         function _createLoanInternal(
@@ -271,4 +282,76 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
             });
             return loanId;
         }
+
+        //On the destination chain
+        function repayCrossChainLoan(
+            uint256 _loanId,
+            string memory destinationChain,
+            string memory destinationAddress
+        ) external payable nonReentrant {
+
+            require(msg.value > 0, "Gas payment is required");
+
+            Loan storage loan = loans[_loanId];
+            require(loan.isActive, "Loan is not active");
+            require(loan.borrower == msg.sender, "Not the borrower");
+
+            uint256 interest = calculateInterest(
+                loan.amount,
+                loan.startTime,
+                loan.duration
+            );
+            uint256 totalRepayment = loan.amount + interest;
+
+            require(
+                lendingToken.transferFrom(
+                    msg.sender,
+                    address(this),
+                    totalRepayment
+                ),
+                "Transfer failed"
+            );
+
+            loan.isActive = false;
+
+            //Send message to source chain to release collateral
+            bytes memory payload = abi.encode(
+                _loanId,
+                loan.collateralId,
+                loan.borrower
+            );
+
+            gasService.payNativeGasForContractCallWithToken{value: msg.value}(
+                address(this),
+                destinationChain,
+                destinationAddress,
+                payload,
+                lendingToken.symbol(), 
+                loan.amount, 
+                msg.sender, 
+            );
+
+            gateway.callContract(sourceChain, sourceAddress, payload);
+
+            emit CrossChainLoanRepaid(_loanId);
+        }
+
+        // On the source chain
+        function _execute(
+             string calldata,
+             string calldata,
+             bytes calldata payload
+        ) internal override {
+            (uint256 loanId, uint256 collateralId, address borrower) = abi.decode (
+                payload,  
+                (uint256, uint256, address)
+            );
+
+            //Release the collateral
+            rwaToken.transferFrom(address(this), borrower, collateralId);
+
+            emit CollateralReleased(loanId, collateralId, borrower);
+        }
+
+
 }
