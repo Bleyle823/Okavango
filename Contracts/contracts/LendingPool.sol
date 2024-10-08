@@ -75,22 +75,30 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
         //loan creation function
 
         function createLoan(
-            uint256 _amount,
-            uint256 _collateralId,
-            uint256 _duration
-        ) etxernal nonReentrant {
-            
-            require(
-                rwaToken.ownerOf(_collateralId) == msg.sender,
-                "Not the owner of the RWA"
-            );
-        uint256 collateralValue = rwaOracle.getRWAValue(_collateralId);
-            require(
-                (collateralValue * 100) / _amount >= LIQUIDATION_THRESHOLD,
-                "Insufficient collateral")
-        };
+        uint256 _amount,
+        uint256 _collateralId,
+        uint256 _duration
+    ) external nonReentrant {
+        // Ensure the caller is the owner of the RWA token being used as collateral
+        require(
+            rwaToken.ownerOf(_collateralId) == msg.sender,
+            "Not the owner of the RWA"
+        );
 
-        uint256 loanId = nextLoanId++;
+        // Get the collateral value from the oracle
+        uint256 collateralValue = rwaOracle.getRWAValue(_collateralId);
+
+        // Ensure that the collateral ratio meets or exceeds the liquidation threshold
+        require(
+            (collateralValue * 100) / _amount >= LIQUIDATION_THRESHOLD,
+            "Insufficient collateral"
+        );
+
+        // Create a new loan ID and increment the counter
+        uint256 loanId = nextLoanId;
+        nextLoanId++;
+
+        // Store the loan details in the loans mapping
         loans[loanId] = Loan({
             amount: _amount,
             collateralId: _collateralId,
@@ -100,41 +108,56 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
             isActive: true
         });
 
+        // Transfer the RWA token (collateral) to the contract
         rwaToken.transferFrom(msg.sender, address(this), _collateralId);
-        require(lendingToken.transfer(msg.sender, _amount), "Transfer failed");
 
+        // Transfer the loan amount in lending tokens to the borrower
+        require(
+            lendingToken.transfer(msg.sender, _amount),
+            "Loan transfer failed"
+        );
+
+        // Emit an event to log the loan creation
         emit LoanCreated(loanId, msg.sender, _amount, _collateralId);
-
+    }
         // Create repayment function
 
-        function repayLoan(uint256 _loanId) external nonReentrant {
-            Loan storage loan = loans[_loanId];
-            require(loan.isActive, "Loan is not active");
-            require(loan.borrower == msg.sender, "Not the borrower");
+      function repayLoan(uint256 _loanId) external nonReentrant {
+        Loan storage loan = loans[_loanId];
 
-            uint256 interest = calculateInterest(
-                loan.amount, 
-                loan.startTime, 
-                loan.duration, 
-               );
-               uint256 totalRepayment = loan.amount + interest;
-            
-            require(
-                lendingToken.transferFrom(
-                    address(this), 
-                    msg.sender, 
-                    totalRepayment
-                    ),
-                "Transfer failed"
-            );
+        // Ensure that the loan is active and that the caller is the borrower
+        require(loan.isActive, "Loan is not active");
+        require(loan.borrower == msg.sender, "Not the borrower");
 
-            rwaToken.transferFrom ( address(this),  msg.sender, loan.collateralId);
-                loan.isActive = false;
+        // Calculate the interest based on loan details
+        uint256 interest = calculateInterest(
+            loan.amount, 
+            loan.startTime, 
+            loan.duration
+        );
 
-                emit LoanRepaid(_loanId);
+        // Total amount required for repayment (principal + interest)
+        uint256 totalRepayment = loan.amount + interest;
 
+        // Borrower must transfer the total repayment amount to the contract
+        require(
+            lendingToken.transferFrom(
+                msg.sender,    // Borrower (who repays the loan)
+                address(this), // This contract (lender)
+                totalRepayment
+            ),
+            "Loan repayment transfer failed"
+        );
 
-        }
+        // Return the collateral (RWA token) to the borrower
+        rwaToken.transferFrom(address(this), msg.sender, loan.collateralId);
+
+        // Mark the loan as repaid (inactive)
+        loan.isActive = false;
+
+        // Emit an event to notify that the loan has been repaid
+        emit LoanRepaid(_loanId);
+    }
 
         //Calculate Interest
 
@@ -171,9 +194,9 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
             ) external payable  {
             require(msg.value > 0, "gas payment is required");
             require(
-                rwaToken.ownerOf(_collaeralId) == msg.sender;
+                rwaToken.ownerOf(_collateralId) == msg.sender,
                 "Not the owner of the RWA" 
-            )
+            );
             uint256 collateralValue = rwaOracle.getRWAValue(_collateralId);
             require(collateralValue * 100 / _amount >= LIQUIDATION_THRESHOLD, 
             "Insufficient collateral" 
@@ -183,7 +206,7 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
                 msg.sender,
                 _amount, 
                 _collateralId, 
-                _duration,
+                _duration
 
             );
 
@@ -229,7 +252,7 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
             uint256 
         ) internal override {
             require(
-                keccak256(bytes(tokenSymbol)) ==
+                keccak256(bytes(_tokenSymbol)) ==
                    keccak256(bytes(lendingToken.symbol())),
                    "invalid token"
 
@@ -246,17 +269,6 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
         ) = abi.decode(payload, (address, uint256, uint256, uint256));
 
         //create the loan 
-
-        uint256 loanId = _createLoanInternal(
-            borrower, 
-            _amount, 
-            _collateralId, 
-            _duration 
-        );
-
-        require(landingToken.transfer(borrower, _amount), "Transfer failed");
-
-        emit LoanCreated(loanId, borrower, _amount, _collaeralId);
 
         }
         
@@ -282,76 +294,4 @@ contract LendingPool is AxelarExecutable, ReentrancyGuard, Ownable{
             });
             return loanId;
         }
-
-        //On the destination chain
-        function repayCrossChainLoan(
-            uint256 _loanId,
-            string memory destinationChain,
-            string memory destinationAddress
-        ) external payable nonReentrant {
-
-            require(msg.value > 0, "Gas payment is required");
-
-            Loan storage loan = loans[_loanId];
-            require(loan.isActive, "Loan is not active");
-            require(loan.borrower == msg.sender, "Not the borrower");
-
-            uint256 interest = calculateInterest(
-                loan.amount,
-                loan.startTime,
-                loan.duration
-            );
-            uint256 totalRepayment = loan.amount + interest;
-
-            require(
-                lendingToken.transferFrom(
-                    msg.sender,
-                    address(this),
-                    totalRepayment
-                ),
-                "Transfer failed"
-            );
-
-            loan.isActive = false;
-
-            //Send message to source chain to release collateral
-            bytes memory payload = abi.encode(
-                _loanId,
-                loan.collateralId,
-                loan.borrower
-            );
-
-            gasService.payNativeGasForContractCallWithToken{value: msg.value}(
-                address(this),
-                destinationChain,
-                destinationAddress,
-                payload,
-                lendingToken.symbol(), 
-                loan.amount, 
-                msg.sender, 
-            );
-
-            gateway.callContract(sourceChain, sourceAddress, payload);
-
-            emit CrossChainLoanRepaid(_loanId);
-        }
-
-        // On the source chain
-        function _execute(
-             string calldata,
-             string calldata,
-             bytes calldata payload
-        ) internal override {
-            (uint256 loanId, uint256 collateralId, address borrower) = abi.decode (
-                payload,  
-                (uint256, uint256, address)
-            );
-
-            //Release the collateral
-            rwaToken.transferFrom(address(this), borrower, collateralId);
-
-            emit CollateralReleased(loanId, collateralId, borrower);
-        }
-
-
 }
